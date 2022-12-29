@@ -19,7 +19,9 @@ import org.springframework.batch.item.file.FlatFileItemReader;
 import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
 import org.springframework.batch.item.file.mapping.DefaultLineMapper;
 import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
+import org.springframework.batch.item.support.CompositeItemProcessor;
 import org.springframework.batch.item.support.CompositeItemWriter;
+import org.springframework.batch.item.support.builder.CompositeItemProcessorBuilder;
 import org.springframework.batch.item.support.builder.CompositeItemWriterBuilder;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -42,8 +44,8 @@ public class PracticeBatchProcessor {
             return jobBuilderFactory.get("jobPracticeProcessor")
                     .incrementer(new RunIdIncrementer())
                     .start(this.stepPracticeTestProcessor(null))
-                    .listener(new SavePersonListener.SavePersonAnnotationJobExecution())    //연속적으로 담아도 가능함 위에가 먼저 실행되고 다음아래
-                    .listener(new SavePersonListener.SavePersonJobExecutionListener())
+//                    .listener(new SavePersonListener.SavePersonAnnotationJobExecution())    //연속적으로 담아도 가능함 위에가 먼저 실행되고 다음아래
+//                    .listener(new SavePersonListener.SavePersonJobExecutionListener())
                     .build();
         }
 
@@ -54,14 +56,42 @@ public class PracticeBatchProcessor {
                     .get("stepPracticeTestProcessor")
                     .<Person, Person>chunk(10)
                     .reader(csvPracticeItemReader())
-                    .processor(new DuplicateValidationProcessor<>(Person::getName,
-                            StringUtils.isNotEmpty(duplicate) && Boolean.parseBoolean(duplicate)))
+//                    .processor(new DuplicateValidationProcessor<>(Person::getName,
+//                            StringUtils.isNotEmpty(duplicate) && Boolean.parseBoolean(duplicate)))
+                    .processor(itepProcessor(duplicate))
                     .writer(csvPracticeItemWriter())
+                    .faultTolerant()
+                    .skip(NotFoundNameException.class)
+                    .skipLimit(2)
+                    .retry(NotFoundNameException.class)
+                    .retryLimit(3)
                     .listener(new SavePersonListener.SavePersonStepExecutionListener())
                     .build();
         }
 
-        private ItemWriter<Person> csvPracticeItemWriter() throws Exception {
+    private ItemProcessor<? super Person, ? extends Person> itepProcessor(String allowDuplicate) throws Exception {
+        DuplicateValidationProcessor<Person> duplicateValidationProcessor=
+                new DuplicateValidationProcessor<Person>(Person::getName, Boolean.parseBoolean(allowDuplicate));
+
+        ItemProcessor<Person,Person> validationProcessor = item -> {
+                if(item.isNotEmptyName()){
+                    return item;
+                }
+
+                throw new NotFoundNameException();
+
+        };
+
+        //두개에 ItemProcessor를 사용하려면 CompositeItemProcessor를 사용하면 된다.
+        CompositeItemProcessor<Person,Person> itemProcessor = new CompositeItemProcessorBuilder<Person,Person>()
+                .delegates(new PersonValidationRetryProcessor() ,duplicateValidationProcessor, validationProcessor)
+                .build();
+
+        itemProcessor.afterPropertiesSet();
+        return itemProcessor;
+    }
+
+    private ItemWriter<Person> csvPracticeItemWriter() throws Exception {
             JpaItemWriter<Person> jpaItemWriter = new JpaItemWriterBuilder<Person>()
                     .entityManagerFactory(entityManagerFactory)
                     .usePersist(true)
@@ -88,13 +118,13 @@ public class PracticeBatchProcessor {
             lineMapper.setLineTokenizer(tokenizer);
 
 
-            lineMapper.setFieldSetMapper(fieldSet -> {  //인덱스 번호로도 가능하다.
-                String name = fieldSet.readString("name");
-                String age = fieldSet.readString("age");
-                String address = fieldSet.readString("address");
+        lineMapper.setFieldSetMapper(fieldSet -> {  //인덱스 번호로도 가능하다.
+            String name = fieldSet.readString("name");
+            String age = fieldSet.readString("age");
+            String address = fieldSet.readString("address");
 
-                return new Person(name,age,address);
-            });
+            return new Person(name,age,address);
+        });
 
         FlatFileItemReader<Person> itemReader
                 = new FlatFileItemReaderBuilder<Person>()
